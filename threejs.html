@@ -1,0 +1,1339 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>cannon.js + three.js - basic integration example</title>
+    <link rel="stylesheet" href="css/style.css" type="text/css" />
+    <meta name="viewport" content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0" />
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "./threejs/build/three.module.js",
+          "cannon":"./dist/cannon-es.js"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <script type="module">
+     import * as CANNON from'cannon'
+      import * as THREE from'three'
+      import Stats from 'https://unpkg.com/three@0.124.0/examples/jsm/libs/stats.module.js'
+      import { GLTFLoader } from'./threejs/examples/jsm/loaders/GLTFLoader.js'
+      import { PointerLockControls } from'./threejs/examples/jsm/controls/PointerLockControls.js'
+      import { OrbitControls } from'./threejs/examples/jsm/controls/OrbitControls.js'
+      import { SmoothieChart, TimeSeries } from './threejs/examples/js/smoothie.js'
+      import { addTitle, addSourceButton } from './threejs/examples/js/dom-utils.js'
+    
+//These are global variables, which are used for the audio to have the access
+      let sound;
+      let sound2;
+
+class Demo extends CANNON.EventTarget {
+  //
+  sceneFolder
+  scenes = []
+  listeners = {}
+
+  // array used to keep in sync the visuals with the bodies
+  // they will have always the same length
+  bodies =[]
+  visuals = []
+  gltf
+  indexAuto
+  caja
+  wheelIndex = 0
+  fpcamera = true;
+  gui
+  smoothie
+  smoothieCanvas
+  isReady = false;
+  poster=true
+  cvTxtMesh2
+  init=false
+  renderModes = ['solid', 'wireframe']
+  dummy = new THREE.Object3D()
+
+  constructor(options) {
+    super(options)
+    
+    // Global settings
+    this.settings = {
+      stepFrequency: 60,
+      quatNormalizeSkip: 2,
+      quatNormalizeFast: true,
+      gx: 0,
+      gy: 0,
+      gz: 0,
+      iterations: 3,
+      tolerance: 0.0001,
+      k: 1e6,
+      d: 3,
+      scene: 0,
+      paused: false,
+      rendermode: 'solid',
+      constraints: false,
+      contacts: false, // Contact points
+      cm2contact: false, // center of mass to contact points
+      normals: false, // contact normals
+      axes: false, // "local" frame axes
+      shadows: false,
+      aabbs: false,
+      profiling: false,
+      maxSubSteps: 20,
+      ...options,
+    }
+
+    if (this.settings.stepFrequency % 60 !== 0) {
+      throw new Error('stepFrequency must be a multiple of 60.')
+    }
+
+    // Init cannon.js
+    this.world = new CANNON.World()
+    // Init three.js
+    this.initThree()
+    //Init message
+    this.message()
+    // Init the geometry caches
+    this.initGeometryCaches()
+    // Init stats.js
+    this.initStats()                                                                                                                                                                                                                                                        
+    // Add title info
+    addTitle()
+    // Add view-source button
+    addSourceButton()
+    // Start the loop!
+    this.animate()
+
+    // Attach listeners                                                                                                                                                                                                                                                                                                                            
+    window.addEventListener('resize', this.resize)
+    document.addEventListener('keypress', this.onKeyPress)
+  }
+
+// This initializes and displays a bar showing the fps.   
+  initStats = () => {
+    this.stats = new Stats()
+    document.body.appendChild(this.stats.domElement)
+  }
+
+  /**
+   * Add a scene to the demo app
+   * @method addScene
+   * @param {String} title Title of the scene
+   * @param {Function} initfunc A function this takes one argument, app, and initializes a physics scene. The function runs app.setWorld(body), app.addVisual(body), app.removeVisual(body) etc.
+   */
+
+   //This function adds a title and a scene where it has loaded objects and a whole world. 
+   // with physics and visuals 
+   // It is this function that adds the whole world.
+  addScene = (title, initfunc) => {
+    if (typeof title !== 'string') {
+      throw new Error('1st argument of Demo.addScene(title,initfunc) must be a string!')
+    }
+    if (typeof initfunc !== 'function') {
+      throw new Error('2nd argument of Demo.addScene(title,initfunc) must be a function!')
+    }
+
+    this.scenes.push(initfunc)
+    const index = this.scenes.length - 1
+  }
+
+
+  /**
+   * Restarts the current scene
+   * @method restartCurrentScene
+   */
+  //This function is in charge of restoring the initial values of the body, such as its position, velocity, and angle.
+  // quartenions and angle 
+  // This is the subtract function 
+  restartCurrentScene = () => {
+    this.bodies.forEach((body) => {
+      body.position.copy(body.initPosition)
+      body.velocity.copy(body.initVelocity)
+      if (body.initAngularVelocity) {
+        body.angularVelocity.copy(body.initAngularVelocity)
+        body.quaternion.copy(body.initQuaternion)
+      }
+    })
+  }
+
+
+  //This function is in charge of updating the arrangement of the visual and bodies and in case of being paused it does not update anything. 
+  // paused it does not update anything, everything is added to a matrix.  
+  // function of update of the gltf and bodies in arrays 
+  updateVisuals = () => {
+    // Copy position data into visuals
+    for (let i = 0; i < this.bodies.length; i++) {
+      const body = this.bodies[i]
+      const visual = this.visuals[i]
+
+      // Interpolated or not?
+      let position = body.interpolatedPosition
+      let quaternion = body.interpolatedQuaternion
+      if (this.settings.paused) {
+        position = body.position
+        quaternion = body.quaternion
+      }
+
+      if (visual.isInstancedMesh) {
+        this.dummy.position.copy(position)
+        this.dummy.quaternion.copy(quaternion)
+
+        this.dummy.updateMatrix()
+
+        visual.setMatrixAt(body.instanceIndex, this.dummy.matrix)
+        visual.instanceMatrix.needsUpdate = true
+      } else {
+        visual.position.copy(position)
+        visual.quaternion.copy(quaternion)
+      }
+    }
+
+    // Render contacts
+    this.contactMeshCache.restart()
+    if (this.settings.contacts) {
+      // if ci is even - use body i, else j
+      for (let i = 0; i < this.world.contacts.length; i++) {
+        const contact = this.world.contacts[i]
+
+        for (let ij = 0; ij < 2; ij++) {
+          const mesh = this.contactMeshCache.request()
+          const b = ij === 0 ? contact.bi : contact.bj
+          const r = ij === 0 ? contact.ri : contact.rj
+          mesh.position.set(b.position.x + r.x, b.position.y + r.y, b.position.z + r.z)
+        }
+      }
+    }
+    this.contactMeshCache.hideCached()
+
+    // Lines from center of mass to contact point
+    this.cm2contactMeshCache.restart()
+    if (this.settings.cm2contact) {
+      for (let i = 0; i < this.world.contacts.length; i++) {
+        const contact = this.world.contacts[i]
+
+        for (let ij = 0; ij < 2; ij++) {
+          const line = this.cm2contactMeshCache.request()
+          const b = ij === 0 ? contact.bi : contact.bj
+          const r = ij === 0 ? contact.ri : contact.rj
+          line.scale.set(r.x, r.y, r.z)
+          makeSureNotZero(line.scale)
+          line.position.copy(b.position)
+        }
+      }
+    }
+    this.cm2contactMeshCache.hideCached()
+
+    this.distanceConstraintMeshCache.restart()
+    this.p2pConstraintMeshCache.restart()
+    if (this.settings.constraints) {
+      this.world.constraints.forEach((constraint) => {
+        switch (true) {
+          // Lines for distance constraints
+          case constraint instanceof CANNON.DistanceConstraint: {
+            constraint.equations.forEach((equation) => {
+              const { bi, bj } = equation
+
+              const line = this.distanceConstraintMeshCache.request()
+
+              // Remember, bj is either a Vec3 or a Body.
+              const vector = bj.position || bj
+
+              line.scale.set(vector.x - bi.position.x, vector.y - bi.position.y, vector.z - bi.position.z)
+              makeSureNotZero(line.scale)
+              line.position.copy(bi.position)
+            })
+
+            break
+          }
+
+          // Lines for point to point constraints
+          case constraint instanceof CANNON.PointToPointConstraint: {
+            constraint.equations.forEach((equation) => {
+              const { bi, bj } = equation
+
+              const relLine1 = this.p2pConstraintMeshCache.request()
+              const relLine2 = this.p2pConstraintMeshCache.request()
+              const diffLine = this.p2pConstraintMeshCache.request()
+              if (equation.ri) {
+                relLine1.scale.set(equation.ri.x, equation.ri.y, equation.ri.z)
+              }
+              if (equation.rj) {
+                relLine2.scale.set(equation.rj.x, equation.rj.y, equation.rj.z)
+              }
+              // BUG this is not exposed anymore in the ContactEquation, this sections needs to be updated
+              if (equation.penetrationVec) {
+                diffLine.scale.set(-equation.penetrationVec.x, -equation.penetrationVec.y, -equation.penetrationVec.z)
+              }
+              makeSureNotZero(relLine1.scale)
+              makeSureNotZero(relLine2.scale)
+              makeSureNotZero(diffLine.scale)
+              relLine1.position.copy(bi.position)
+              relLine2.position.copy(bj.position)
+
+              if (equation.bj && equation.rj) {
+                equation.bj.position.vadd(equation.rj, diffLine.position)
+              }
+            })
+            break
+          }
+        }
+      })
+    }
+    this.p2pConstraintMeshCache.hideCached()
+    this.distanceConstraintMeshCache.hideCached()
+
+    // Normal lines
+    this.normalMeshCache.restart()
+    if (this.settings.normals) {
+      for (let i = 0; i < this.world.contacts.length; i++) {
+        const constraint = this.world.contacts[i]
+
+        const bi = constraint.bi
+        const bj = constraint.bj
+        const line = this.normalMeshCache.request()
+
+        const constraintNormal = constraint.ni
+        const body = bi
+        line.scale.set(constraintNormal.x, constraintNormal.y, constraintNormal.z)
+        makeSureNotZero(line.scale)
+        line.position.copy(body.position)
+        constraint.ri.vadd(line.position, line.position)
+      }
+    }
+    this.normalMeshCache.hideCached()
+
+    // Frame axes for each body
+    this.axesMeshCache.restart()
+    if (this.settings.axes) {
+      for (let i = 0; i < this.bodies.length; i++) {
+        const body = this.bodies[i]
+
+        const mesh = this.axesMeshCache.request()
+        mesh.position.copy(body.position)
+        mesh.quaternion.copy(body.quaternion)
+      }
+    }
+    this.axesMeshCache.hideCached()
+
+    // AABBs
+    this.bboxMeshCache.restart()
+    if (this.settings.aabbs) {
+      for (let i = 0; i < this.bodies.length; i++) {
+        const body = this.bodies[i]
+        if (body.updateAABB) {
+          if (body.aabbNeedsUpdate) {
+            body.updateAABB()
+          }
+
+          // Todo: cap the infinite AABB to scene AABB, for now just dont render
+          if (
+            isFinite(body.aabb.lowerBound.x) &&
+            isFinite(body.aabb.lowerBound.y) &&
+            isFinite(body.aabb.lowerBound.z) &&
+            isFinite(body.aabb.upperBound.x) &&
+            isFinite(body.aabb.upperBound.y) &&
+            isFinite(body.aabb.upperBound.z) &&
+            body.aabb.lowerBound.x - body.aabb.upperBound.x != 0 &&
+            body.aabb.lowerBound.y - body.aabb.upperBound.y != 0 &&
+            body.aabb.lowerBound.z - body.aabb.upperBound.z != 0
+          ) {
+            const mesh = this.bboxMeshCache.request()
+            mesh.scale.set(
+              body.aabb.lowerBound.x - body.aabb.upperBound.x,
+              body.aabb.lowerBound.y - body.aabb.upperBound.y,
+              body.aabb.lowerBound.z - body.aabb.upperBound.z
+            )
+            mesh.position.set(
+              (body.aabb.lowerBound.x + body.aabb.upperBound.x) * 0.5,
+              (body.aabb.lowerBound.y + body.aabb.upperBound.y) * 0.5,
+              (body.aabb.lowerBound.z + body.aabb.upperBound.z) * 0.5
+            )
+          }
+        }
+      }
+    }
+    this.bboxMeshCache.hideCached()
+  }
+
+  // this function receives the objects and adds them to the world 
+  addworld(object)
+  {
+    this.world.addBody(object)
+  }
+
+  //This function changes the scenes where it removes the events that have already occurred and adds the others. 
+  //scenes 
+  changeScene = (n) => {
+    this.dispatchEvent({ type: 'destroy' })
+
+    // unbind all listeners
+    Object.keys(this.listeners).forEach((event) => {
+      this.listeners[event].forEach((callback) => {
+        this.removeEventListener(event, callback)
+      })
+    })
+    this.listeners = {}
+
+    // clear any previous logs
+    console.clear()
+
+    this.settings.paused = false
+    this.updateGui()
+    this.buildScene(n)
+  }
+
+    //Initializes the scene builder where our world will be loaded. 
+  start = () => {
+    this.buildScene(0)
+  }
+
+  //This function receives the scene number and deletes what the world had before to add what this new scene has. 
+  // that this new scenario has.
+  // This is the function that updates the scenario. 
+  buildScene = (n) => {
+    // Remove current bodies
+    this.bodies.forEach((body) => this.world.removeBody(body))
+
+    // Remove all visuals
+    this.removeAllVisuals()
+
+    // Remove all constraints
+    while (this.world.constraints.length) {
+      this.world.removeConstraint(this.world.constraints[0])
+    }
+
+    // Run the user defined "build scene" function
+    this.scenes[n]()
+
+    // Read the newly set data to the gui
+    this.settings.iterations = this.world.solver.iterations
+    this.settings.gx = this.world.gravity.x + 0.0
+    this.settings.gy = this.world.gravity.y + 0.0
+    this.settings.gz = this.world.gravity.z + 0.0
+    this.settings.quatNormalizeSkip = this.world.quatNormalizeSkip
+    this.settings.quatNormalizeFast = this.world.quatNormalizeFast
+    // this.updateGui()
+
+    this.restartGeometryCaches()
+  }
+
+//This function assigns values to the materials such as color and type, and returns the values of a mesh and in some cases returns a mesh. 
+// of a mesh and in some cases returns a mesh. 
+//initializes the geometries 
+  initGeometryCaches = () => {
+    // Material
+    this.materialColor = 0x393d42
+    this.solidMaterial = new THREE.MeshLambertMaterial({ color: this.materialColor })
+    //THREE.ColorUtils.adjustHSV( solidMaterial.color, 0, 0, 0.9 );
+    this.wireframeMaterial = new THREE.MeshBasicMaterial({ color: 0xFEEE00, wireframe: true })
+    this.currentMaterial = this.solidMaterial
+    const contactDotMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff })
+    this.particleMaterial = new THREE.MeshLambertMaterial({ color: 0xff0000 })
+    this.triggerMaterial = new THREE.MeshBasicMaterial({ color: 0x00ff00, wireframe: true })
+
+    const contactPointGeometry = new THREE.SphereGeometry(0.1, 6, 6)
+    this.contactMeshCache = new GeometryCache(this.scene, () => {
+      return new THREE.Mesh(contactPointGeometry, contactDotMaterial)
+    })
+
+    this.cm2contactMeshCache = new GeometryCache(this.scene, () => {
+      const geometry = new THREE.Geometry()
+      geometry.vertices.push(new THREE.Vector3(0, 0, 0))
+      geometry.vertices.push(new THREE.Vector3(1, 1, 1))
+      return new THREE.Line(geometry, new THREE.LineBasicMaterial({ color: 0xff0000 }))
+    })
+
+    const bboxGeometry = new THREE.BoxGeometry(1, 1, 1)
+    const bboxMaterial = new THREE.MeshBasicMaterial({
+      color: this.materialColor,
+      wireframe: true,
+    })
+    this.bboxMeshCache = new GeometryCache(this.scene, () => {
+      return new THREE.Mesh(bboxGeometry, bboxMaterial)
+    })
+
+    this.distanceConstraintMeshCache = new GeometryCache(this.scene, () => {
+      const geometry = new THREE.Geometry()
+      geometry.vertices.push(new THREE.Vector3(0, 0, 0))
+      geometry.vertices.push(new THREE.Vector3(1, 1, 1))
+      return new THREE.Line(geometry, new THREE.LineBasicMaterial({ color: 0xff0000 }))
+    })
+
+    this.p2pConstraintMeshCache = new GeometryCache(this.scene, () => {
+      const geometry = new THREE.Geometry()
+      geometry.vertices.push(new THREE.Vector3(0, 0, 0))
+      geometry.vertices.push(new THREE.Vector3(1, 1, 1))
+      return new THREE.Line(geometry, new THREE.LineBasicMaterial({ color: 0xff0000 }))
+    })
+
+    this.normalMeshCache = new GeometryCache(this.scene, () => {
+      const geometry = new THREE.Geometry()
+      geometry.vertices.push(new THREE.Vector3(0, 0, 0))
+      geometry.vertices.push(new THREE.Vector3(1, 1, 1))
+      return new THREE.Line(geometry, new THREE.LineBasicMaterial({ color: 0x00ff00 }))
+    })
+
+    this.axesMeshCache = new GeometryCache(this.scene, () => {
+      const mesh = new THREE.Object3D()
+      const origin = new THREE.Vector3(0, 0, 0)
+      const gX = new THREE.Geometry()
+      const gY = new THREE.Geometry()
+      const gZ = new THREE.Geometry()
+      gX.vertices.push(origin)
+      gY.vertices.push(origin)
+      gZ.vertices.push(origin)
+      gX.vertices.push(new THREE.Vector3(1, 0, 0))
+      gY.vertices.push(new THREE.Vector3(0, 1, 0))
+      gZ.vertices.push(new THREE.Vector3(0, 0, 1))
+      const lineX = new THREE.Line(gX, new THREE.LineBasicMaterial({ color: 0xff0000 }))
+      const lineY = new THREE.Line(gY, new THREE.LineBasicMaterial({ color: 0x00ff00 }))
+      const lineZ = new THREE.Line(gZ, new THREE.LineBasicMaterial({ color: 0x0000ff }))
+      mesh.add(lineX)
+      mesh.add(lineY)
+      mesh.add(lineZ)
+      return mesh
+    })
+  }
+
+  //This function restores the values of the meshes already created and hides the cache created. 
+  restartGeometryCaches = () => {
+    this.contactMeshCache.restart()
+    this.contactMeshCache.hideCached()
+
+    this.cm2contactMeshCache.restart()
+    this.cm2contactMeshCache.hideCached()
+
+    this.distanceConstraintMeshCache.restart()
+    this.distanceConstraintMeshCache.hideCached()
+
+    this.normalMeshCache.restart()
+    this.normalMeshCache.hideCached()
+  }
+
+  //This function renders at all times what is inside the function as well as updating the values it contains, such as camera position, and view type as well as updating 
+  // the values that it contains, such as the camera position, and the view type as well as the 
+  //checking the location of the carriage  
+  //Function animates everything inside the function. 
+  animate = () => {
+   
+    requestAnimationFrame(this.animate)
+     
+    if(this.isReady){
+      if (!this.settings.paused) {
+        this.updatePhysics()
+        this.updateVisuals()
+      }
+
+      //update camera position
+      if(this.bodies[this.indexAuto]){
+        if(!this.fpcamera){
+          this.controls.unlock()
+          this.camera.position.x = this.bodies[this.indexAuto].position.x
+          this.camera.position.y = 40
+          this.camera.position.z = this.bodies[this.indexAuto].position.z
+          this.camera.lookAt(this.bodies[this.indexAuto].position.x,this.bodies[this.indexAuto].position.y,this.bodies[this.indexAuto].position.z)
+        }else{
+          this.controls.lock();
+          this.scene.traverse( res => {
+            if(res.name == "Wheel4"){
+              
+              this.camera.position.x = res.position.x
+              this.camera.position.z = res.position.z
+              this.camera.position.y = 2.0
+            }
+          })
+        }
+      }
+      this.camera.updateProjectionMatrix;
+      this.renderer.render(this.scene, this.camera)
+      this.stats.update()
+      
+
+      if(this.cvTxtMesh2.name =="TxtGeometry2"){
+      if(!this.poster){
+          if(!this.fpcamera){
+          this.cvTxtMesh2.rotation.x = -1.57;
+          this.cvTxtMesh2.rotation.z =0;
+          this.cvTxtMesh2.rotation.y =0;
+          this.cvTxtMesh2.position.set(-5,30,10)
+        }else{  
+          this.cvTxtMesh2.rotation.y =Math.PI/2;
+          this.cvTxtMesh2.rotation.x =6.3;
+          this.cvTxtMesh2.position.set(-10, 2, 10)
+        }
+        sound.pause()
+        sound2.pause()
+         this.cvTxtMesh2.visible = true
+          this.scene.add( this.cvTxtMesh2 );
+        }else{
+          this.cvTxtMesh2.position.set(-10, -15, 10)
+         this.cvTxtMesh2.visible = false
+     
+        }
+      }
+    }
+
+  }
+
+  lastCallTime = 0
+  resetCallTime = false
+
+ //This function updates the physics of the world with the frequency of the set time. 
+  updatePhysics = () => {
+    // Step world
+    const timeStep = 1 / this.settings.stepFrequency
+
+    const now = performance.now() / 1000
+
+    if (!this.lastCallTime) {
+      // last call time not saved, cant guess elapsed time. Take a simple step.
+      this.world.step(timeStep)
+      this.lastCallTime = now
+      return
+    }
+
+    let timeSinceLastCall = now - this.lastCallTime
+    if (this.resetCallTime) {
+      timeSinceLastCall = 0
+      this.resetCallTime = false
+    }
+
+    this.world.step(timeStep, timeSinceLastCall, this.settings.maxSubSteps)
+
+    this.lastCallTime = now
+  }
+
+  //Dimensions the size where the scene will be created by giving the size of the window and 
+  // the size of the matrix, according to the window height and width
+  resize = () => {
+    this.camera.aspect = window.innerWidth / window.innerHeight
+    this.camera.updateProjectionMatrix()
+    this.renderer.setSize(window.innerWidth, window.innerHeight)
+  }
+
+  //It is an event that detects when one of the keys is pressed, and if it is one of the selected keys, the following will occur 
+  // selected will occur what is inside the case  
+  // function of event of pressing of some key 
+  onKeyPress = (event) => {
+    switch (event.code) {
+      case 'Space': // Space - restart
+        this.restartCurrentScene()
+        this.fpcamera=true
+        this.poster=true
+        sound.play()
+        sound2.play()
+       this.settings.paused =false
+        break
+    case 'KeyC': // c - constraints
+        if(!this.poster == false){
+          this.fpcamera = !this.fpcamera;
+        }
+        break
+
+    }
+  }
+
+//Inicalizes the three js where the camera is added and the values of this one, besides creating the lights and shadows, as well as the type of light and the direction of this one, besides creating the music of the environment. 
+//shadows, as well as the type of light and the direction of this, in addition to the music of the environment. 
+//initializes the characteristics of the three js of the scenery. 
+  initThree = () => {
+    // Camera
+    this.camera = new THREE.PerspectiveCamera(35, window.innerWidth / window.innerHeight, 0.1, 200)
+    // Scene
+    this.scene = new THREE.Scene()
+    this.scene.fog = new THREE.Fog(0x222222, 1000, 2000)
+
+    // Renderer
+    this.renderer = new THREE.WebGLRenderer({ antialias: false })
+    this.renderer.setSize(window.innerWidth, window.innerHeight)
+    document.body.appendChild(this.renderer.domElement)
+
+    this.renderer.setClearColor(this.scene.fog.color, 1)
+
+    this.renderer.shadowMap.enabled = true;
+	  this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+	  this.renderer.outputEncoding = THREE.sRGBEncoding;
+
+    // Lights
+    this.ambientLight = new THREE.AmbientLight(0xffffff, 1)
+    this.scene.add(this.ambientLight)
+
+    this.spotLight = new THREE.SpotLight(0xffffff, 0.9, 0, Math.PI / 8, 1)
+    this.spotLight.position.set(-30, 80, 30)
+    this.spotLight.target.position.set(0, 0, 0)
+
+    this.spotLight.castShadow = true
+
+    this.spotLight.shadow.camera.near = 0.001
+    this.spotLight.shadow.camera.far = 1000
+    this.spotLight.shadow.camera.fov = 30
+
+    // spotLight.shadow.bias = -0.0001
+    this.spotLight.shadow.mapSize.width = 2048
+    this.spotLight.shadow.mapSize.height = 2048
+
+    this.scene.add(this.spotLight)
+
+    const directionalLight = new THREE.DirectionalLight(0xffffff, 0.15)
+    directionalLight.position.set(-30, 40, 30)
+    directionalLight.target.position.set(0, 0, 0)
+    this.scene.add(directionalLight)
+
+    // Orbit controls
+    window.addEventListener("click", function(event) {
+      
+      if(! this.init){
+        demo.Music();
+        demo.MusicCar();
+        this.init=true
+      }
+    });
+    this.controls = new PointerLockControls(this.camera, this.renderer.domElement)
+    this.controls.rotateSpeed = 1.0
+    this.controls.zoomSpeed = 1.2
+    this.controls.enableDamping = true
+    this.controls.enablePan = false
+    this.controls.dampingFactor = 0.2
+    this.controls.minDistance = 10
+    this.controls.maxDistance = 500
+  }
+
+
+  //This function creates a listener for the sound variable that is assigned and where an audio is loaded.
+  // and is assigned to the buffer, where that buffer is assigned to the sound variable where a loop is activated and a volume is given, where a 
+  // a loop is activated and a volume is set, where it is activated
+  // function ambient music  
+  Music=()=>{
+    const listener = new THREE.AudioListener();
+    this.camera.add(listener)
+    sound = new THREE.Audio( listener );
+    const audioLoader = new THREE.AudioLoader();
+   audioLoader.load( './Sounds/ambienete.mp3', function( buffer ) {
+      sound.setBuffer( buffer );
+	    sound.setLoop( true );
+	    sound.setVolume( 0.5 );
+	    sound.play();
+    });
+  
+  }
+
+  //This function creates a listener for the sound variable that is assigned and where an audio is loaded.
+  // and is assigned to the buffer, where that buffer is assigned to the sound variable where a loop is activated and a volume is given, where a 
+  // a loop is activated and a volume is set, where it is activated
+  //car music function   
+  MusicCar=()=>{
+    const listener = new THREE.AudioListener();
+    this.camera.add(listener)
+    sound2 = new THREE.Audio( listener );
+     const audioLoader = new THREE.AudioLoader();
+   audioLoader.load( './Sounds/motor.mp3', function( buffer ) {
+      sound2.setBuffer( buffer );
+	    sound2.setLoop( true );
+	    sound2.setVolume( 0.1 );
+	    sound2.play();
+    });
+  
+  }
+
+ //This function sets the ready flag to start loading the whole program. 
+  ready(){
+    this.isReady = true;
+  }
+
+//This function sends the world all that this includes the objects, gravity and collisions. 
+  getWorld() {
+    return this.world
+  }
+
+  //this function receives what is the gltf and a body , where the gltf is added to a matrix 
+  // and to an array , also the body is added to an array of body 
+  // adds the gltf to a scenario. 
+  addGltf(gltf, body){
+    this.gltf = gltf;
+    this.gltf.updateMatrix();
+    this.gltf.name = "camioneta";
+    this.bodies.push(body)
+    
+    this.visuals.push(gltf)
+
+    this.indexAuto = this.visuals.indexOf(gltf); 
+  
+    this.scene.add(gltf)
+  }
+  
+//Receive a variable box which is equal to the carriage cab which is assigned to a varibale box already }
+// created in the environment 
+  addcaja(caja) {
+    this.caja = caja;
+  }
+
+  //This function receives a body and a gltf, where the body is added to an array, and the gltf is assigned a name, where it is also added to an array of gltfs. 
+  //a name where it is also added to an array of gltfs and finally d is added to the scene.  
+  //This function is in charge of adding the gltf to the rim. 
+  addwheel(body, gltf){ 
+    this.bodies.push(body)
+    gltf.name = "Wheel" + this.wheelIndex;
+    this.wheelIndex++
+    this.visuals.push(gltf)
+    this.scene.add(gltf)
+  }
+
+//This function receives a gltf , and adds it to the scene. 
+  addSceneGltf(gltf){
+
+    this.scene.add(gltf);
+  }
+  
+ // This function checks the position of the carriage with respect to an area of a plane, 
+ //where it is within the constraints.
+ //This function is in charge of verifying at all times if the parking was done correctly.
+  checkinthepushplane(plane,obj1) {
+    if(plane.position.x-0.2 < obj1.position.x && plane.position.z+0.2 > obj1.position.z && plane.position.x+0.2 > obj1.position.x && plane.position.z+0.2 > obj1.position.z &&
+      plane.position.x-0.2 < obj1.position.x && plane.position.z-0.2 < obj1.position.z && plane.position.x+0.2 > obj1.position.x && plane.position.z-0.2 < obj1.position.z  )   
+      { 
+        this.poster=false
+        this.settings.paused =true            
+    }else{
+      
+    }
+  }  
+
+//Remove the visuals of a body, checking first that the body exists, then do a splice and assign an index to it. 
+// make a splice and assign the index of the object, then remove the visuals from the scene. 
+removeVisual(body) {
+    const index = this.bodies.findIndex((b) => b.id === body.id)
+
+    if (index === -1) {
+      return
+    }
+
+    const visual = this.visuals[index]
+
+    this.bodies.splice(index, 1)
+    this.visuals.splice(index, 1)
+
+    this.scene.remove(visual)
+  }
+
+  //In this function you enter a loop that runs through an array of bodies, where a function is called. 
+  //inside where the bodies are sent 
+  removeAllVisuals() {
+    while (this.bodies.length) {
+      this.removeVisual(this.bodies[0])
+    }
+  }
+
+  //This function adds all events to an array, this function is recursive.
+  addEventListener(event, callback) {
+    if (this.listeners[event]) {
+      this.listeners[event].push(callback)
+    } else {
+      this.listeners[event] = [callback]
+    }
+
+    super.addEventListener(event, callback)
+  }
+
+  //This function creates a 2d object in which a variable text is created and a
+//size of letters and typology, then it is given the text and position that it will occupy in the 2d object.
+// This poster is the one with the initial instructions and is the first thing you see when you start the game. 
+  Notificate = () => {
+    var cv = document.createElement( 'canvas' );
+        cv.width = 1536 //  3 * 512
+        cv.height = 512;
+        var ctx = cv.getContext( '2d' );
+        ctx.fillStyle = '#fefefe'; 
+        ctx.fillRect( 0, 0, cv.width, cv.height );
+        ctx.fillStyle = '#ED0404';
+        ctx.textAlign = "left";
+        ctx.textBaseline = "middle";
+        ctx.font = 'bold 6vh Arial';
+              // https://unicode.org/emoji/charts/full-emoji-list.html#1f642 (mark and copy - column Browser)
+        ctx.fillText( '                                                    Curso de Conducir', 0, 0.1 * cv.height );
+        ctx.fillText( '                                                     ', 0, 0.2 * cv.height );
+        ctx.fillText( '                           Estacionate de forma correcta dentro del area señalada', 0, 0.2 * cv.height );
+        ctx.fillText( '                                               Te mueves con las teclas:', 0, 0.3 * cv.height );
+        ctx.fillText( '                                             -Adelante(w)    -Atras(s)', 0, 0.4 * cv.height );
+        ctx.fillText( '                                             -Derecha(a)     -Izquierda(d)', 0, 0.5 * cv.height);
+        ctx.fillText( '                                        -Cambiar de vista(c)  -Frenar(b)', 0, 0.6 * cv.height);
+        ctx.fillText( '                                  -------------------------------------------------------------', 0, 0.7 * cv.height );
+        ctx.fillText( '                   El aprender correctamente hacer las cosas puede cambiarlo todo     ', 0, 0.8 * cv.height );
+        ctx.fillText( '                                        -Atentamente la administración', 0, 0.9 * cv.height );
+        var txtGeometry = new THREE.BoxGeometry( 3, 2, 0.1 ); // w 3 : h 1
+        var cvTexture = new THREE.Texture( cv );
+        cvTexture.needsUpdate = true; // otherwise all black only
+        var spineMat = new THREE.MeshPhongMaterial( { color: 0xa5800e } );
+        var cvMaterial = new THREE.MeshBasicMaterial( { map: cvTexture  } );
+        var cvMaterials = [ spineMat, spineMat, spineMat, spineMat, cvMaterial, cvMaterial ]; 
+       var  cvTxtMesh = new THREE.Mesh( txtGeometry, cvMaterials );
+        cvTxtMesh.rotation.y = -3.2; // radiant
+        cvTxtMesh.position.set( 14, 2, -12 );
+        cvTxtMesh.name = "TxtGeometry";
+        this.scene.add( cvTxtMesh );
+  }
+//This function creates a 2d object in which a variable text is created and a
+//size of letters and typology, then it is given the text and position that it will occupy in the 2d object.
+// this is the function that creates the message that it was achieved to park successfully 
+  message=()=>{
+    var cv = document.createElement( 'canvas' );
+        cv.width = 1536 //  3 * 512
+        cv.height = 512;
+        var ctx = cv.getContext( '2d' );
+        ctx.fillStyle = '#fefefe'; 
+        ctx.fillRect( 0, 0, cv.width, cv.height );
+        ctx.fillStyle = '#ED0404';
+        ctx.textAlign = "left";
+        ctx.textBaseline = "middle";
+        ctx.font = ' bold 48px Arial';
+              // https://unicode.org/emoji/charts/full-emoji-list.html#1f642 (mark and copy - column Browser)
+        ctx.fillText( '                                                     ', 0, 0.1 * cv.height );
+        ctx.fillText( '                                                     ', 0, 0.2 * cv.height );
+        ctx.fillText( '                                                     ', 0, 0.3 * cv.height );
+        ctx.fillText( '                   Fecidades  te estacionaste de forma correcta  ', 0, 0.4 * cv.height );
+        ctx.fillText( '                                                      ', 0, 0.5 * cv.height );
+        ctx.fillText( '                                                      ', 0, 0.6 * cv.height);
+        ctx.fillText( '                     Presiona espacio  para volver a intentarlo  ', 0, 0.7 * cv.height);
+        ctx.fillText( '                                                      ', 0, 0.8 * cv.height );
+        ctx.fillText( '                                                     ', 0, 0.9 * cv.height );
+        ctx.fillText( '                                                     ', 0, 1 * cv.height );
+        var txtGeometry = new THREE.BoxGeometry( 3, 2, 0.1 ); // w 3 : h 1
+        var cvTexture = new THREE.Texture( cv );
+        cvTexture.needsUpdate = true; // otherwise all black only
+        var spineMat = new THREE.MeshPhongMaterial ( { color: 0xa5800e } );
+        var cvMaterial = new THREE.MeshBasicMaterial( { map: cvTexture  } );
+        var cvMaterials = [ spineMat, spineMat, spineMat, spineMat, cvMaterial, cvMaterial ]; 
+        this.cvTxtMesh2 = new THREE.Mesh( txtGeometry, cvMaterials );
+        this.cvTxtMesh2.matrixWorldNeedsUpdate = true;
+        this.cvTxtMesh2.name = "TxtGeometry2";
+
+  }
+
+//This function is in charge of pausing by changing the property that has the vehicle changing its state. 
+// as well as resetting the time
+//This function pauses for the whole game until it is reset. 
+  paused=()=>{
+    this.settings.paused = !this.settings.paused
+        this.resetCallTime = true
+        this.updateGui()
+      
+  }
+}
+
+
+class GeometryCache {
+  geometries = []
+  gone = []
+
+  constructor(scene, createFunc) {
+    this.scene = scene
+    this.createFunc = createFunc
+  }
+
+  request = () => {
+    const geometry = this.geometries.length > 0 ? this.geometries.pop() : this.createFunc()
+
+    this.scene.add(geometry)
+    this.gone.push(geometry)
+    return geometry
+  }
+
+  restart = () => {
+    while (this.gone.length) {
+      this.geometries.push(this.gone.pop())
+    }
+  }
+
+  hideCached = () => {
+    this.geometries.forEach((geometry) => {
+      this.scene.remove(geometry)
+    })
+  }
+
+}
+
+
+function makeSureNotZero(vector) {
+  if (vector.x === 0) {
+    vector.x = 1e-6
+  }
+  if (vector.y === 0) {
+    vector.y = 1e-6
+  }
+  if (vector.z === 0) {
+    vector.z = 1e-6
+  }
+}
+
+
+
+
+    
+    
+const demo = new Demo()
+
+      demo.addScene('Car', () => {
+        const world =setupWorld(demo) 
+        // Build the car chassis
+        const chassisShape = new CANNON.Box(new CANNON.Vec3(2, 0.5, 1))
+        const chassisBody = new CANNON.Body({ mass: 1000 })//NO
+        chassisBody.addShape(chassisShape)
+        chassisBody.position.set(14.25, 1.01, -15.03)
+        const quaternion = new CANNON.Quaternion().setFromEuler(0, 14, 0)
+        chassisBody.quaternion = quaternion;
+        chassisBody.angularVelocity.set(0, 2, 0)
+        //Collision walls are created but they are invisible, they are the collision physics of the world.
+        // create a box and body with mass to have physicality, give the body a position
+        // the body is instantiated with the box and then added to the world.  
+        /// Front wall of the cars
+        const muros =new  CANNON.Box(new CANNON.Vec3(13, 4 ,0.5))
+        const choque = new CANNON.Body({ mass: 0 })//NO
+        choque.position.set(-4, 4, 2.5)
+        choque.addShape(muros)
+        demo.addworld(choque);
+        // I move close to the carriages
+        const muros2 =new  CANNON.Box(new CANNON.Vec3(13, 4 ,0.5))
+        const choque2 = new CANNON.Body({ mass: 0 })
+        choque2.position.set(-3.9, 4, 12)
+        choque2.addShape(muros2)
+        demo.addworld(choque2);
+        //long wall 
+        const muros3 =new  CANNON.Box(new CANNON.Vec3(0.5, 4 ,18.5))
+        const choque3 = new CANNON.Body({ mass: 0 })
+        choque3.position.set(19, 4, 0)
+        choque3.addShape(muros3)
+        demo.addworld(choque3);
+        // end wall of the carriage corridor
+        const muros4 =new  CANNON.Box(new CANNON.Vec3(0.5, 4 ,5))
+        const choque4 = new CANNON.Body({ mass: 0 })
+        choque4.position.set(-17, 4, 7)
+        choque4.addShape(muros4)
+        demo.addworld(choque4);
+        //short wall parallel to the long wall 
+        const muros5 =new  CANNON.Box(new CANNON.Vec3(0.5, 4 ,3))
+        const choque5 = new CANNON.Body({ mass: 0 })
+        choque5.position.set(8.5, 4, 15)
+        choque5.addShape(muros5)
+        demo.addworld(choque5);
+        //long wall parallel to the long wall}
+        const muros6 =new  CANNON.Box(new CANNON.Vec3(0.5, 4 ,10.5))
+        const choque6 = new CANNON.Body({ mass: 0 })
+        choque6.position.set(8.5, 4, -8)
+        choque6.addShape(muros6)
+        demo.addworld(choque6);
+        ///header wall from the front aisle where the cars are not in the corridor
+        const muros7 =new  CANNON.Box(new CANNON.Vec3(6, 4 ,0.5))
+        const choque7 = new CANNON.Body({ mass: 0 })
+        choque7.position.set(13, 4, 19)
+        choque7.addShape(muros7)
+        demo.addworld(choque7);
+        //muro detope detope from back aisle where no cars 
+        const muros8 =new  CANNON.Box(new CANNON.Vec3(5, 4 ,0.5))
+        const choque8 = new CANNON.Body({ mass: 0 })
+        choque8.position.set(14, 4, -19)
+        choque8.addShape(muros8)
+        demo.addworld(choque8);
+        //blue car
+        const carroazul =new  CANNON.Box(new CANNON.Vec3(2.5, 0.5 ,1))
+        const carr1 = new CANNON.Body({ mass: 0 })
+        carr1.position.set(1, 1, 10.5)
+        carr1.addShape(carroazul)
+        demo.addworld(carr1);
+        //red car 
+        const carrorojo =new  CANNON.Box(new CANNON.Vec3(2.5, 1,1))
+        const carr2 = new CANNON.Body({ mass: 0 })
+        carr2.position.set(-12.3, 1, 10.5)
+        carr2.addShape(carrorojo)
+        demo.addworld(carr2);
+        //A plane is created where and assigned a color with a wireframe material and added to the visual world.
+        //Parking zone
+        const geometry = new THREE.PlaneGeometry( 6, 2.3);
+        const material = new THREE.MeshBasicMaterial( {color: 0xFE0000, side: THREE.DoubleSide,wireframe:true} );
+        const zone = new THREE.Mesh( geometry, material );
+        zone.rotateX(Math.PI/2); 
+       zone.position.set(-5.5,.3,10)
+        demo.addSceneGltf(zone);
+        //Two variables are created, one of them is assigned the path of a folder where a gltf is, where it can be assigned a position, a scale, a position and a scale. 
+        // then the gktf of the path is assigned to one of the variables, where it is assigned a position, scale, and scale.
+        // after that the chassis and the gltf are installed.   
+        //Load GLTF
+        var carrito;
+        var ruta = './models/Camioneta4.glb';
+        new GLTFLoader().load(ruta, res => { 
+          res.parser.getDependencies( 'material' ).then( ( materials ) => {
+          if (materials) {
+            const newMaterial = new THREE.MeshPhysicalMaterial({ map: materials.map });
+           materials = newMaterial;
+          }
+          for (let i = 0; i < res.children; i++) Utilities.setMaterialsOnGLTF(res.children[i]);
+        });
+          carrito = res.scene;
+            carrito.castShadow = true;
+		        carrito.receiveShadow = true;  
+            carrito.scale.setScalar(0.40, 0.40, 0.40);
+            demo.addGltf(carrito, chassisBody)
+        });
+
+        // Create the vehicle
+        const vehicle = new CANNON.RaycastVehicle({
+          chassisBody,
+        })
+
+        //Se crea   la  llantas con las caracteristicas que va tener como radio,direccion,etc.
+        //Se crea la variable llanta
+        const wheelOptions = {
+          radius: 0.8,
+          directionLocal: new CANNON.Vec3(0, -1, 0),
+          suspensionStiffness: 30,
+          suspensionRestLength: 0.3,
+          frictionSlip: 100,
+          dampingRelaxation: 2.3,
+          dampingCompression: 4.4,
+          maxSuspensionForce: 10000000,
+          rollInfluence: 0.01,
+          axleLocal: new CANNON.Vec3(0, 0, 1),
+          chassisConnectionPointLocal: new CANNON.Vec3(-1, 0, 1),
+          maxSuspensionTravel: 10000,
+          customSlidingRotationalSpeed: -60,
+          useCustomSlidingRotationalSpeed: true,
+        }
+        //The rim where the inner tube will be positioned is created, giving different characteristics 
+        // to the other rims
+        //varible rim tube
+        const camWheelOptions = {
+          radius: 0.1,
+          directionLocal: new CANNON.Vec3(0, -2, 0),
+          suspensionStiffness: 0,
+          suspensionRestLength: 0.3,
+          frictionSlip: 0,
+          dampingRelaxation: 0,
+          dampingCompression: 0,
+          maxSuspensionForce: 1,
+          rollInfluence: 0,
+          axleLocal: new CANNON.Vec3(0, 0, 1),
+          chassisConnectionPointLocal: new CANNON.Vec3(-1, 0, 1),
+          maxSuspensionTravel: 1,
+          customSlidingRotationalSpeed: 0,
+          useCustomSlidingRotationalSpeed: true,
+        }
+
+        //The tires are intannated to the car chassis and positioned on the car.  
+        wheelOptions.chassisConnectionPointLocal.set(-1.1, 0, 0.8)
+        vehicle.addWheel(wheelOptions)
+
+        wheelOptions.chassisConnectionPointLocal.set(-1.1, 0, -0.8)
+        vehicle.addWheel(wheelOptions)
+
+        wheelOptions.chassisConnectionPointLocal.set(1.45, 0, 0.8)
+        vehicle.addWheel(wheelOptions)
+
+        wheelOptions.chassisConnectionPointLocal.set(1.45, 0, -0.8)
+        vehicle.addWheel(wheelOptions)
+
+        camWheelOptions.chassisConnectionPointLocal.set(0.3, 0, 0.3)
+        vehicle.addWheel(camWheelOptions)
+
+        vehicle.addToWorld(world)
+
+        // Add the wheel bodies
+        const wheelBodies = []
+        const wheelMaterial = new CANNON.Material('wheel')
+        vehicle.wheelInfos.forEach((wheel) => {
+          const cylinderShape = new CANNON.Cylinder(wheel.radius, wheel.radius, wheel.radius / 2, 20)
+          const wheelBody = new CANNON.Body({
+            mass: 0,
+            material: wheelMaterial,
+          })
+          wheelBody.type = CANNON.Body.KINEMATIC
+          wheelBody.collisionFilterGroup = 0 // turn off collisions
+          const quaternion = new CANNON.Quaternion().setFromEuler(-Math.PI / 2, 0, 0)
+          wheelBody.addShape(cylinderShape, new CANNON.Vec3(), quaternion)
+          
+
+          //add gltf of wheels
+          var llanta;
+          var ruta = './models/llanta.gltf';
+          new GLTFLoader().load(ruta, res => {
+              llanta = res.scene;
+              llanta.scale.setScalar(0.3, 0.3, 0.3);
+              wheelBodies.push(wheelBody)
+              demo.addwheel(wheelBody,llanta)
+              world.addBody(wheelBody)
+            });
+          
+        })
+
+        // Update the wheel bodies
+        world.addEventListener('postStep', () => {
+          for (let i = 0; i < vehicle.wheelInfos.length; i++) {
+            try {
+              vehicle.updateWheelTransform(i)
+              const transform = vehicle.wheelInfos[i].worldTransform
+              const wheelBody = wheelBodies[i]
+              wheelBody.position.copy(transform.position)
+              wheelBody.quaternion.copy(transform.quaternion)
+              
+              throw 'loading'; // generates an exception
+            } catch (e) {
+  
+            }
+            
+          }
+        })
+
+        // Add the ground
+        const sizeX = 20
+        const sizeZ = 20
+        const matrix = []
+        for (let i = 0; i < sizeX; i++) {
+          matrix.push([])
+          for (let j = 0; j < sizeZ; j++) {
+            if (i === 0 || i === sizeX - 1 || j === 0 || j === sizeZ - 1) {
+              const height = 3
+              matrix[i].push(height)
+              continue
+            }
+
+            const height = 1;
+            matrix[i].push(height)
+          }
+        }
+
+        const groundMaterial = new CANNON.Material('ground')
+        const heightfieldShape = new CANNON.Heightfield(matrix, {
+          elementSize: 100 / sizeX,
+        })
+        const heightfieldBody = new CANNON.Body({ mass: 0, material: groundMaterial })
+        heightfieldBody.addShape(heightfieldShape)
+        heightfieldBody.position.set(
+          -(sizeX * heightfieldShape.elementSize) / 2,
+          -1,
+          (sizeZ * heightfieldShape.elementSize) / 2
+        )
+        heightfieldBody.quaternion.setFromEuler(-Math.PI / 2, 0, 0)
+        world.addBody(heightfieldBody)
+
+
+        //addgltfScene
+        var scene;
+        var rutaScene = './models/parque.gltf';
+        new GLTFLoader().load(rutaScene, res => {
+          scene = res.scene;
+          scene.position.y = -0.75;
+          scene.scale.setScalar(2.5);
+          demo.addSceneGltf(scene);
+        });
+
+        // Define interactions between wheels and ground
+        const wheel_ground = new CANNON.ContactMaterial(wheelMaterial, groundMaterial, {
+          friction: 0.3,
+          restitution: 0,
+          contactEquationStiffness: 1000,
+        })
+        world.addContactMaterial(wheel_ground)
+
+        // Keybindings
+        // Add force on keydown
+        //The keyboard events, when it detects that a d key is pressed, which moves the vehicle according to the direction assigned to the key. 
+        //the direction assigned to the key.
+        document.addEventListener('keydown', (event) => {
+          const maxSteerVal = 0.5
+          const maxForce = 1000
+          const brakeForce = 1000000
+          switch (event.key) {
+            case 'w':
+            case 'ArrowUp':
+              vehicle.applyEngineForce(-maxForce, 2)
+              vehicle.applyEngineForce(-maxForce, 3)
+              demo.checkinthepushplane(zone,vehicle.chassisBody)
+
+              break
+
+            case 's':
+            case 'ArrowDown':
+              vehicle.applyEngineForce(maxForce, 2)
+              vehicle.applyEngineForce(maxForce, 3)
+              demo.checkinthepushplane(zone,vehicle.chassisBody)
+              break
+
+            case 'a':
+            case 'ArrowLeft':
+              vehicle.setSteeringValue(maxSteerVal, 0)
+              vehicle.setSteeringValue(maxSteerVal, 1)
+              demo.checkinthepushplane(zone,vehicle.chassisBody)
+              break
+
+            case 'd':
+            case 'ArrowRight':
+              vehicle.setSteeringValue(-maxSteerVal, 0)
+              vehicle.setSteeringValue(-maxSteerVal, 1)
+              demo.checkinthepushplane(zone,vehicle.chassisBody)
+              break
+
+            case 'b':
+              vehicle.setBrake(brakeForce, 0)
+              vehicle.setBrake(brakeForce, 1)
+              vehicle.setBrake(brakeForce, 2)
+              vehicle.setBrake(brakeForce, 3)
+              break
+          }
+        })
+
+        // Reset force on keyup
+        document.addEventListener('keyup', (event) => {
+          switch (event.key) {
+            case 'w':
+            case 'ArrowUp':
+              vehicle.applyEngineForce(0, 2)
+              vehicle.applyEngineForce(0, 3)
+              break
+
+            case 's':
+            case 'ArrowDown':
+              vehicle.applyEngineForce(0, 2)
+              vehicle.applyEngineForce(0, 3)
+              break
+
+            case 'a':
+            case 'ArrowLeft':
+              vehicle.setSteeringValue(0, 0)
+              vehicle.setSteeringValue(0, 1)
+              break
+
+            case 'd':
+            case 'ArrowRight':
+              vehicle.setSteeringValue(0, 0)
+              vehicle.setSteeringValue(0, 1)
+              break
+
+            case 'b':
+              vehicle.setBrake(0, 0)
+              vehicle.setBrake(0, 1)
+              vehicle.setBrake(0, 2)
+              vehicle.setBrake(0, 3)
+              break
+          }
+          
+        })
+      })
+      
+      //
+      demo.Notificate()
+      demo.start()
+      demo.ready();
+    // create a world constant of the demo class and assign the world properties to it 
+      function setupWorld(demo) {
+        const world = demo.getWorld()
+        world.gravity.set(0, -10, 0)
+
+        // Sweep and prune broadphaseF
+        world.broadphase = new CANNON.SAPBroadphase(world)
+
+        // Disable friction by default
+        world.defaultContactMaterial.friction = 1000
+
+        return world
+      }
+    </script>
+  </body>
+</html>
